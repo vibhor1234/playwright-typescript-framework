@@ -1,5 +1,5 @@
 {
-  "name": "test_typescript",
+  "name": "playwright-typescript-framework",
   "version": "1.0.0",
   "description": "Playwright + TypeScript end-to-end test framework for uitestingplayground.com",
   "private": true,
