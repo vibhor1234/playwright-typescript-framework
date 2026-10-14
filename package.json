@@ -1,8 +1,8 @@
 {
   "name": "test_typescript",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "Playwright + TypeScript end-to-end test framework for uitestingplayground.com",
+  "private": true,
   "scripts": {
     "test": "playwright test",
     "test:headed": "playwright test --headed",
