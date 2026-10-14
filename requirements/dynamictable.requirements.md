@@ -2,9 +2,11 @@
 
 **URL:** http://www.uitestingplayground.com/dynamictable
 
-**Scenario:** The table shows running processes (Name, CPU, Memory, Network, Disk). Column order
-and row order change on every page load, and cell values are random. A yellow label below the
-table shows Chrome's CPU value independently.
+**Scenario:** The table shows running processes (Name, CPU, Memory, Network, Disk). Row order is
+random on every page load, as is the order of the CPU/Memory/Network/Disk columns among
+themselves (`Name` is always the first column — verified against the live site across repeated
+reloads). Cell values are random. A yellow label below the table shows Chrome's CPU value
+independently.
 
 ## Steps
 
@@ -22,4 +24,4 @@ table shows Chrome's CPU value independently.
   (`pages/DynamicTablePage.ts`), exposed via a reusable `getCellValue(rowName, columnName)` method.
 - Assertions stay in the test file, not in the page object.
 - Must be stable across repeated runs against freshly reloaded/randomized data. Verified via:
-  `npx playwright test tests/dynamictable.spec.ts --repeat-each=5`
+  `npx playwright test tests/dynamictable.spec.ts --repeat-each=5 --workers=1`

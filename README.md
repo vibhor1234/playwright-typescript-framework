@@ -1,28 +1,30 @@
 # UI Testing Playground — Playwright + TypeScript Automation Framework
 
-End-to-end tests for [uitestingplayground.com](http://www.uitestingplayground.com/), built with
-Playwright Test and TypeScript.
-
-This README is written as answers to the three questions the framework needs to answer: **what
-was automated, how is it designed, and does it follow current standards.**
+End-to-end test framework for [uitestingplayground.com](http://www.uitestingplayground.com/),
+built with Playwright Test and TypeScript. Page Object Model, fixture injection, strict typing,
+linting, and a CI pipeline — the same standards expected of a production test suite, applied to a
+small, reviewable scope.
 
 ## Contents
 
-- [Q1: What has been automated?](#q1-what-has-been-automated)
-- [Q2: What design pattern does the framework use, and how is it designed?](#q2-what-design-pattern-does-the-framework-use-and-how-is-it-designed)
-- [Q3: Does the framework follow the latest standard?](#q3-does-the-framework-follow-the-latest-standard)
+- [What's automated](#whats-automated)
+- [Project structure](#project-structure)
+- [Getting started](#getting-started)
+- [Design: Page Object Model + fixtures](#design)
+- [Standards followed](#standards-followed)
 - [Scripts](#scripts)
 
-## Q1: What has been automated?
+## What's automated
 
 Three scenarios from uitestingplayground.com, each with its own page object, test file, and
-requirements document:
+requirements document. Full detail on each — including how the random row/column order is
+handled — is in the sections right below the table.
 
-| #   | Scenario                               | Flow                                                                                                               | Assertion                                                                                            |
-| --- | -------------------------------------- | ------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------- |
-| 1   | **Progress Bar** (`/progressbar`)      | Click **Start**, wait until the bar reaches ≥75%, click **Stop**                                                   | Final value ≥ 75%                                                                                    |
-| 2   | **Scroll To Click** (`/scrolltoclick`) | Scroll a button into view, click it                                                                                | Button text becomes `"Clicked!"`, class gains `btn-success`                                          |
-| 3   | **Dynamic Table** (`/dynamictable`)    | Look up the Chrome row's CPU value by name (not position), read the same value from a yellow label below the table | The two values match — proven stable across 5 reloads, each with a different random row/column order |
+| #   | Scenario                               | Flow                      | Assertion                              |
+| --- | --------------------------------------- | --------------------------- | ----------------------------------------- |
+| 1   | **Progress Bar** (`/progressbar`)      | Start → wait for ≥75% → Stop | Final value ≥ 75%                     |
+| 2   | **Scroll To Click** (`/scrolltoclick`) | Scroll into view, click    | Text → `"Clicked!"`, class → `btn-success` |
+| 3   | **Dynamic Table** (`/dynamictable`)    | Find Chrome row by name, read CPU | Matches the yellow label, stable over 5 reloads |
 
 ### Progress Bar — detail
 
@@ -45,14 +47,17 @@ Documented in `requirements/scrolltoclick.requirements.md`.
 
 ### Dynamic Table — detail
 
-The table's row order, column order, and values are randomized on every reload, and the yellow
-label below it independently states Chrome's CPU value. `pages/DynamicTablePage.ts` solves this
-with:
+The table's row order is randomized on every reload, as is the order of the `CPU`/`Memory`/
+`Network`/`Disk` columns among themselves (`Name` is always first — verified against the live
+site across repeated reloads). The yellow label below the table independently states Chrome's CPU
+value. `pages/DynamicTablePage.ts` solves this with:
 
 - `getColumnHeaders()` — reads the header row fresh, by name, every call.
 - `getCellValue(rowName, columnName)` — resolves `columnName` to whatever index it currently sits
-  at, scans the rows for the one whose first cell matches `rowName`, and returns that cell —
-  entirely by name, with no assumption about position.
+  at that reload, then scans the rows and matches `rowName` against each row's first cell (the
+  `Name` column), returning the cell at the resolved column index. `columnName` lookup is fully
+  position-independent; row lookup relies on `Name` staying the first column, which holds true on
+  this site.
 - `getWarningLabelText()` — reads the yellow label's raw text.
 
 `tests/dynamictable.spec.ts` calls `getCellValue('Chrome', 'CPU')`, reads the label, and asserts
@@ -63,69 +68,7 @@ test, not the page object.
 (`--repeat-each=5 --workers=1`), each run against a freshly reloaded, independently randomized
 page. Verified passing 5/5.
 
-## Q2: What design pattern does the framework use, and how is it designed?
-
-**Page Object Model (POM) + Fixture Injection** — the pattern Playwright's own documentation
-recommends for combining the two (https://playwright.dev/docs/pom):
-
-1. **Page Object Model** — every page under test has a class in `pages/` owning its locators and
-   the actions you can perform on it (click, scroll, read a value). Page objects never make
-   assertions; they only describe "what's on the page" and "what you can do to it."
-2. **Fixture injection** — tests don't construct page objects themselves. `fixtures.ts` extends
-   Playwright's `test` with custom fixtures (`progressBarPage`, `scrollToClickPage`,
-   `dynamicTablePage`) that construct the right page object and navigate to its URL _before_ the
-   test body runs. A test just asks for the fixture it needs as a parameter.
-
-### Why split it this way
-
-| Concern                          | Lives in            | Why                                                                                                                                              |
-| -------------------------------- | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Locators & page actions          | `pages/*.ts`        | Reusable across tests; fix a broken selector in one place                                                                                        |
-| Navigation + object construction | `fixtures.ts`       | Keeps test bodies free of setup boilerplate                                                                                                      |
-| Assertions (`expect(...)`)       | `tests/*.spec.ts`   | Only the test knows what "pass" means for its scenario — page objects stay reusable even if two tests want different assertions on the same page |
-| Shared page plumbing             | `pages/BasePage.ts` | Every page object needs `page` and a way to navigate — defined once                                                                              |
-
-### How a test actually runs — walkthrough
-
-Take `tests/progressbar.spec.ts`:
-
-```ts
-import { test, expect } from '../fixtures';
-
-test('starts progress and stops once target value is reached', async ({ progressBarPage }) => {
-  await progressBarPage.clickStart();
-  await expect.poll(() => progressBarPage.getProgressValue(), { timeout: 30000 })
-    .toBeGreaterThanOrEqual(75);
-  await progressBarPage.clickStop();
-  ...
-});
-```
-
-1. The test imports `test`/`expect` from **`fixtures.ts`**, not directly from `@playwright/test`
-   — this is what makes the custom `progressBarPage` fixture available.
-2. The test declares `{ progressBarPage }` as a parameter. Playwright matches it against the
-   fixture definition in `fixtures.ts`:
-   ```ts
-   progressBarPage: async ({ page }, use) => {
-     const progressBarPage = new ProgressBarPage(page);
-     await progressBarPage.goto();   // navigation happens here, before the test body runs
-     await use(progressBarPage);     // hand the ready-to-use page object to the test
-   },
-   ```
-3. By the time the test body executes, the browser is already on `/progressbar` and
-   `progressBarPage` is a ready instance. The test only calls actions (`clickStart()`) and makes
-   assertions (`expect.poll(...)`).
-4. `ProgressBarPage` extends `BasePage`, which just holds `page` and a `navigateTo(path)` helper.
-   `ProgressBarPage` itself only knows about `#startButton`, `#stopButton`, `#progressBar`, and
-   exposes `clickStart()`, `clickStop()`, `getProgressValue()` — plain actions/getters, no
-   `expect` calls inside.
-
-`expect.poll(...)` is Playwright's built-in idiom for "keep checking a value until it satisfies a
-condition, within a timeout" — the standard tool for a value that changes asynchronously (like an
-animating progress bar). Every other test (`scrolltoclick.spec.ts`, `dynamictable.spec.ts`)
-follows the same shape: ask for a fixture → call page-object actions → assert in the test.
-
-### Folder structure
+## Project structure
 
 ```
 .github/workflows/playwright.yml    CI pipeline: typecheck + lint + test on every push/PR
@@ -150,34 +93,86 @@ requirements/
   *.requirements.md                 One plain-English requirements doc per test scenario
 ```
 
-### Adding a new page/test
+## Getting started
 
-1. Create `pages/NewThingPage.ts` extending `BasePage`:
-   ```ts
-   export class NewThingPage extends BasePage {
-     readonly someButton: Locator;
-     constructor(page: Page) {
-       super(page);
-       this.someButton = page.locator('#someButton');
-     }
-     async goto() {
-       await this.navigateTo('/newthing');
-     }
-     async clickSomeButton() {
-       await this.someButton.click();
-     }
-   }
-   ```
-2. Register it as a fixture in `fixtures.ts` (construct + `goto()` + `use(...)`).
-3. Write `tests/newthing.spec.ts` using `{ newThingPage }` and put the `expect(...)` calls there.
-4. Add `requirements/newthing.requirements.md` describing the scenario in plain English.
+```bash
+git clone <this-repo>
+cd playwright-typescript-framework
+npm install
+npx playwright install --with-deps   # downloads browser binaries
+npm test                             # runs the full suite headless
+```
 
-## Q3: Does the framework follow the latest standard?
+## Design
 
-**Yes.** Concretely:
+**Page Object Model (POM) + Fixture Injection** — the pattern Playwright's own documentation
+recommends for combining the two (https://playwright.dev/docs/pom):
+
+1. **Page Object Model** — every page under test has a class in `pages/` owning its locators and
+   the actions you can perform on it (click, scroll, read a value). Page objects never make
+   assertions; they only describe "what's on the page" and "what you can do to it."
+2. **Fixture injection** — tests don't construct page objects themselves. `fixtures.ts` extends
+   Playwright's `test` with custom fixtures (`progressBarPage`, `scrollToClickPage`,
+   `dynamicTablePage`) that construct the right page object and navigate to its URL _before_ the
+   test body runs. A test just asks for the fixture it needs as a parameter.
+
+### Why split it this way
+
+| Concern                          | Lives in            | Why                              |
+| --------------------------------- | -------------------- | ----------------------------------- |
+| Locators & page actions          | `pages/*.ts`        | Reusable across tests              |
+| Navigation + object construction | `fixtures.ts`       | Keeps test bodies boilerplate-free |
+| Assertions (`expect(...)`)       | `tests/*.spec.ts`   | Only the test knows what "pass" means |
+| Shared page plumbing             | `pages/BasePage.ts` | Defined once, reused everywhere    |
+
+Assertions stay out of page objects specifically because two tests might want different
+assertions against the same page — keeping `pages/*.ts` assertion-free keeps them reusable either
+way.
+
+### How a test actually runs
+
+Take `tests/progressbar.spec.ts`:
+
+```ts
+import { test, expect } from '../fixtures';
+
+test('starts progress and stops once target value is reached', async ({ progressBarPage }) => {
+  await progressBarPage.clickStart();
+  await expect.poll(() => progressBarPage.getProgressValue(), { timeout: 30000 })
+    .toBeGreaterThanOrEqual(75);
+  await progressBarPage.clickStop();
+  ...
+});
+```
+
+The test imports `test`/`expect` from `fixtures.ts`, not directly from `@playwright/test` — this
+is what makes the custom `progressBarPage` fixture available. When the test declares
+`{ progressBarPage }`, Playwright resolves it against the fixture definition in `fixtures.ts`:
+
+```ts
+progressBarPage: async ({ page }, use) => {
+  const progressBarPage = new ProgressBarPage(page);
+  await progressBarPage.goto();   // navigation happens here, before the test body runs
+  await use(progressBarPage);     // hand the ready-to-use page object to the test
+},
+```
+
+By the time the test body executes, the browser is already on `/progressbar` and
+`progressBarPage` is a ready instance. The test only calls actions (`clickStart()`) and makes
+assertions (`expect.poll(...)`). `ProgressBarPage` extends `BasePage`, which just holds `page` and
+a `navigateTo(path)` helper; `ProgressBarPage` itself only knows about `#startButton`,
+`#stopButton`, `#progressBar`, and exposes `clickStart()`, `clickStop()`, `getProgressValue()` —
+plain actions/getters, no `expect` calls inside.
+
+`expect.poll(...)` is Playwright's built-in idiom for "keep checking a value until it satisfies a
+condition, within a timeout" — the standard tool for a value that changes asynchronously (like an
+animating progress bar). Every other test (`scrolltoclick.spec.ts`, `dynamictable.spec.ts`)
+follows the same shape: ask for a fixture → call page-object actions → assert in the test.
+
+## Standards followed
 
 | Concern                     | Tool/convention used                                                                                                   | Config                              |
-| --------------------------- | ---------------------------------------------------------------------------------------------------------------------- | ----------------------------------- |
+| ----------------------------- | -------------------------------------------------------------------------------------------------------------------------- | -------------------------------------- |
 | Page object design          | Playwright's officially documented POM + fixture-injection pattern                                                     | `fixtures.ts`, `pages/*.ts`         |
 | Waiting on async conditions | `expect.poll(...)` (Playwright's built-in polling idiom) instead of custom retry loops                                 | used in `tests/progressbar.spec.ts` |
 | Static typing               | TypeScript `strict` mode, plus `noUnusedLocals`/`noUnusedParameters`/`noFallthroughCasesInSwitch`                      | `tsconfig.json`                     |
@@ -187,38 +182,24 @@ requirements/
 | CI-aware test config        | `forbidOnly`, CI-conditional `retries`/`workers` — the standard Playwright scaffold pattern                            | `playwright.config.ts`              |
 | Continuous integration      | GitHub Actions: runs typecheck, lint, and the full test suite on every push/PR, uploads the HTML report as an artifact | `.github/workflows/playwright.yml`  |
 
-For context, this is the same role each tool plays in a Python stack, for anyone mapping it
-across ecosystems:
+### Version note: TypeScript pinned to 6.0.3
 
-| Python-world tool | TypeScript/Node equivalent used here |
-| ----------------- | ------------------------------------ |
-| flake8            | ESLint                               |
-| black             | Prettier                             |
-| mypy              | TypeScript strict mode               |
-| pytest            | Playwright Test                      |
-| tox               | GitHub Actions CI                    |
-
-**One version decision worth knowing about:** `typescript` is pinned to `6.0.3` rather than the
-newest `7.0.2`. TypeScript 7 is the brand-new native/Go-ported compiler; `typescript-eslint` (the
-tool providing type-aware linting) currently only supports TypeScript `< 6.1.0`. 6.0.3 is the
-newest version still fully supported by that lint tooling, so it was chosen deliberately to keep
-linting fully functional rather than chasing the newest compiler release.
+`typescript` is pinned to `6.0.3` rather than the newest `7.0.2`. TypeScript 7 is the brand-new
+native/Go-ported compiler; `typescript-eslint` (the tool providing type-aware linting) currently
+only supports TypeScript `< 6.1.0`. 6.0.3 is the newest version still fully supported by that lint
+tooling, so it was chosen deliberately to keep linting fully functional rather than chasing the
+newest compiler release.
 
 ### Verification
 
-```
-npm run typecheck   # tsc --noEmit
-npm run lint         # eslint .
-npm test             # full suite
-npm run test:dynamictable:stability   # 5 repeat runs, proving stability
-```
-
-CI runs the same checks automatically on every push via `.github/workflows/playwright.yml`.
+The commands that prove the table above (`npm run typecheck`, `npm run lint`, `npm test`, and the
+stability run) are listed with the rest of the npm scripts in [Scripts](#scripts) below. CI runs
+the same checks automatically on every push via `.github/workflows/playwright.yml`.
 
 ## Scripts
 
 | Command                               | What it does                                                                                                                    |
-| ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| --------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
 | `npm test`                            | Run every spec in `tests/`                                                                                                      |
 | `npm run test:headed`                 | Same, with a visible browser                                                                                                    |
 | `npm run test:dynamictable:stability` | Run the dynamic table test 5x in a row (`--repeat-each=5 --workers=1`) to prove it's stable against randomized row/column order |
